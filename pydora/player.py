@@ -1,19 +1,6 @@
-#!/usr/bin/env python
-"""
-Sample Barebones Pandora Player
+import select
 
-This is a very simple Pandora player that streams music from Pandora. It
-requires mpg123 to function. No songs are downloaded, they are streamed
-directly from Pandora's servers.
-"""
-from __future__ import print_function
-
-import os
-import sys
-from pandora import APIClient, clientbuilder
-
-from .mpg123 import Player
-from .utils import Colors, Screen
+from .utils import iterate_forever
 
 
 class PlayerCallbacks(object):
@@ -44,156 +31,93 @@ class PlayerCallbacks(object):
         pass
 
 
-class PlayerApp(object):
+class Player(object):
+    """Implementation Independent Player Logic
 
-    CMD_MAP = {
-        "n": ("play next song", "skip_song"),
-        "p": ("pause/resume song", "pause_song"),
-        "s": ("stop playing station", "stop_station"),
-        "d": ("dislike song", "dislike_song"),
-        "u": ("like song", "like_song"),
-        "b": ("bookmark song", "bookmark_song"),
-        "a": ("bookmark artist", "bookmark_artist"),
-        "S": ("sleep song for 30 days", "sleep_song"),
-        "Q": ("quit player", "quit"),
-        "?": ("display this help", "help"),
-    }
+    Provides a player interface by wrapping a back-end that actually does the
+    song playing.
+    """
 
-    def __init__(self):
-        self.client = None
-        self.player = Player(self, sys.stdin)
+    def __init__(self, callbacks, control_channel, backend):
+        """Create a player instance
 
-    def get_client(self):
-        cfg_file = os.environ.get("PYDORA_CFG", "")
-        builder = clientbuilder.PydoraConfigFileBuilder(cfg_file)
-        if builder.file_exists:
-            return builder.build()
-
-        builder = clientbuilder.PianobarConfigFileBuilder()
-        if builder.file_exists:
-            return builder.build()
-
-        if not self.client:
-            Screen.print_error("No valid config found")
-            sys.exit(1)
-
-    def station_selection_menu(self):
-        """Format a station menu and make the user select a station
+        Callbacks is an class implementing the PlayerCallbacks interface.
+        Control channel is a file-like object that will provide commands to the
+        player instance.
         """
-        Screen.clear()
+        self._interesting_fds = [control_channel]
+        self._control_fd = control_channel.fileno()
+        self._callbacks = callbacks
+        self._backend = backend
+        self._backend.ensure_started(self._interesting_fds)
 
-        for i, s in enumerate(self.stations):
-            i = "{:>3}".format(i)
-            print("{}: {}".format(Colors.yellow(i), s.name))
+    def _is_control_channel(self, fd):
+        """Determines if channel is control channel
+        """
+        return fd.fileno() == self._control_fd
 
-        return self.stations[Screen.get_integer("Station: ")]
+    def _poll(self, song):
+        """Poll control channel and optionally other fds
+
+        Will pass input to input callback otherwise returns input to player
+        loop for handling.
+        """
+        readers, _, _ = select.select(self._interesting_fds, [], [], 1)
+
+        for fd in readers:
+            value = fd.readline().strip()
+
+            if self._is_control_channel(fd):
+                self._callbacks.input(value, song)
+            else:
+                self._backend.handle_message(value)
 
     def play(self, song):
-        """Play callback
+        """Play a new song from a Pandora model
+
+        Returns once the stream starts but does not shut down the remote mpg123
+        process. Calls the input callback when the user has input. Back-ends
+        can abort playback by raising a StopIteration exception.
         """
-        if song.is_ad:
-            print("{} ".format(Colors.cyan("Advertisement")))
-        else:
-            print("{} by {}".format(Colors.cyan(song.song_name),
-                  Colors.yellow(song.artist_name)))
-
-    def skip_song(self, song):
-        if song.is_ad:
-            Screen.print_error("Cannot skip advertisements")
-        else:
-            self.player.stop()
-
-    def pause_song(self, song):
-        self.player.pause()
-
-    def stop_station(self, song):
-        self.player.end_station()
-
-    def dislike_song(self, song):
-        try:
-            if song.thumbs_down():
-                Screen.print_success("Track disliked")
-                self.player.stop()
-            else:
-                Screen.print_error("Failed to dislike track")
-        except NotImplementedError:
-            Screen.print_error("Cannot dislike this type of track")
-
-    def like_song(self, song):
-        try:
-            if song.thumbs_up():
-                Screen.print_success("Track liked")
-            else:
-                Screen.print_error("Failed to like track")
-        except NotImplementedError:
-            Screen.print_error("Cannot like this type of track")
-
-    def bookmark_song(self, song):
-        try:
-            if song.bookmark_song():
-                Screen.print_success("Bookmarked song")
-            else:
-                Screen.print_error("Failed to bookmark song")
-        except NotImplementedError:
-            Screen.print_error("Cannot bookmark this type of track")
-
-    def bookmark_artist(self, song):
-        try:
-            if song.bookmark_artist():
-                Screen.print_success("Bookmarked artist")
-            else:
-                Screen.print_error("Failed to bookmark artis")
-        except NotImplementedError:
-            Screen.print_error("Cannot bookmark artist for this type of track")
-
-    def sleep_song(self, song):
-        try:
-            if song.sleep():
-                Screen.print_success("Song will not be played for 30 days")
-                self.player.stop()
-            else:
-                Screen.print_error("Failed to sleep song")
-        except NotImplementedError:
-            Screen.print_error("Cannot sleep this type of track")
-
-    def quit(self, song):
-        self.player.end_station()
-        sys.exit(0)
-
-    def help(self, song):
-        print("")
-        print("\n".join([
-            "\t{} - {}".format(k, v[0]) for k, v in self.CMD_MAP.items()
-        ]))
-        print("")
-
-    def input(self, input, song):
-        """Input callback, handles key presses
-        """
-        try:
-            cmd = getattr(self, self.CMD_MAP[input][1])
-        except (IndexError, KeyError):
-            return Screen.print_error("Invalid command!")
-
-        cmd(song)
-
-    def pre_poll(self):
-        Screen.set_echo(False)
-
-    def post_poll(self):
-        Screen.set_echo(True)
-
-    def run(self):
-        self.client = self.get_client()
-        self.stations = self.client.get_station_list()
+        self._callbacks.play(song)
+        self._backend.play(song.audio_url)
 
         while True:
             try:
-                station = self.station_selection_menu()
-                self.player.play_station(station)
-            except KeyboardInterrupt:
-                sys.exit(0)
+                self._callbacks.pre_poll()
+                self._backend.ensure_started(self._interesting_fds)
 
+                try:
+                    self._poll(song)
+                except StopIteration:
+                    return
+            finally:
+                self._callbacks.post_poll()
 
-def main():
-    PlayerApp().run()
+    def stop(self):
+        """Stop the currently playing song
+        """
+        self._backend.stop()
+
+    def pause(self):
+        """Pause the currently playing song
+        """
+        self._backend.pause()
+
+    def end_station(self):
+        """Stop playing the station
+        """
+        raise StopIteration
+
+    def play_station(self, station):
+        """Play the station until something ends it
+
+        This function will run forever until termintated by calling
+        end_station.
+        """
+        for song in iterate_forever(station.get_playlist):
+            try:
+                self.play(song)
+            except StopIteration:
+                self.stop()
+                return

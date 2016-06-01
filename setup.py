@@ -21,7 +21,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "pydora = pydora.player:main",
+            "pydora = pydora.app:main",
             "pydora-configure = pydora.configure:main",
         ],
     },
