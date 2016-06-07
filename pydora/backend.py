@@ -65,6 +65,8 @@ class MPG123BackEnd(object):
 
 # /Applications/VLC.app/Contents/MacOS/VLC \
 #       --intf http --http-host 127.0.0.1 --http-port 9090 --http-password 123
+#
+# Protocol: https://wiki.videolan.org/VLC_HTTP_requests/
 
 class VLCBackEnd(object):
     """Remote control for a VLC process
